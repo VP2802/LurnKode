@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+/m6-judge/node_modules/
 bun.lockb
 
 # Environment variables
