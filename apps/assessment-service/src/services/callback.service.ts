@@ -21,7 +21,8 @@ export class CallbackService {
    * Ensures idempotency: duplicate callbacks for already-judged submissions are safely ignored.
    */
   async processJudgeCallback(
-    payload: JudgeCallbackInput
+    payload: JudgeCallbackInput,
+    options: { requireMatchingJudgeJob?: boolean } = {}
   ): Promise<{ submission: CodeSubmission; idempotent: boolean }> {
     const submission = await this.repo.findCodeSubmissionById(payload.submissionId);
     if (!submission) {
@@ -29,6 +30,21 @@ export class CallbackService {
         404,
         "SUBMISSION_NOT_FOUND",
         `Submission ${payload.submissionId} not found`
+      );
+    }
+
+    // M6 results name the judge submission they belong to; refuse a result for a
+    // different judge run than the one this submission was dispatched as.
+    if (
+      options.requireMatchingJudgeJob &&
+      submission.judgeJobId &&
+      payload.judgeJobId &&
+      submission.judgeJobId !== payload.judgeJobId
+    ) {
+      throw new ServiceError(
+        409,
+        "JUDGE_SUBMISSION_MISMATCH",
+        `Result is for judge submission ${payload.judgeJobId}, but ${submission.id} was dispatched as ${submission.judgeJobId}`
       );
     }
 
@@ -113,10 +129,15 @@ export class CallbackService {
       item.points
     );
 
+    // A compile error produces no per-test results; keep the judge's CE verdict
+    // instead of the generic "WA" the scoring engine reports for missing tests.
+    const finalStatus =
+      payload.finalStatus === "CE" && payload.testResults.length === 0 ? "CE" : grading.finalStatus;
+
     // 3. Atomically update submission status (single transaction once backed by PostgreSQL)
     const judged = await this.repo.updateCodeSubmission(submission.id, {
       status: "judged",
-      finalStatus: grading.finalStatus,
+      finalStatus,
       score: grading.score,
       maxScore: item.points,
       executionMs: payload.executionMs,

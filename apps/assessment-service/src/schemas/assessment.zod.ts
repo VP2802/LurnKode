@@ -10,6 +10,8 @@ export const assessmentItemTypeSchema = z.enum(["mcq", "programming"]);
 export const mcqSelectionTypeSchema = z.enum(["single", "multiple"]);
 export const attemptStatusSchema = z.enum(["in_progress", "submitted", "grading", "completed", "failed"]);
 export const judgeVerdictSchema = z.enum(["AC", "WA", "TLE", "MLE", "RE", "RTE", "CE"]);
+/** Languages the M6 judge can run (m6-judge/src/domain/validate.ts). */
+export const programmingLanguageSchema = z.enum(["python", "cpp"]);
 
 /**
  * MCQ payload schema
@@ -74,14 +76,15 @@ export const testCaseSchema = z.object({
   weight: z.number().positive().default(1),
 });
 
+/** Upper bounds are M6's sandbox policy ceilings; M6 rejects requests above them. */
 export const executionLimitsSchema = z.object({
-  cpu: z.number().positive().default(1),
-  memoryMb: z.number().positive().default(128),
-  timeoutMs: z.number().positive().default(3000),
+  cpu: z.number().positive().max(1).default(1),
+  memoryMb: z.number().positive().max(128).default(128),
+  timeoutMs: z.number().int().positive().max(3000).default(3000),
 });
 
 export const programmingPayloadSchema = z.object({
-  language: z.enum(["python", "javascript", "typescript"]),
+  language: programmingLanguageSchema,
   starterCode: z.string().optional(),
   solution: z.string().optional(),
   hiddenTestCases: z.array(testCaseSchema).min(1),
@@ -134,7 +137,7 @@ export const submitMcqAnswerSchema = z.object({
 
 export const submitCodeSchema = z.object({
   itemId: z.string().min(1),
-  language: z.enum(["python", "javascript", "typescript"]),
+  language: programmingLanguageSchema,
   sourceCode: z.string().min(1).max(65536),
 });
 
@@ -197,6 +200,86 @@ export const judgeCallbackSchema = z
       });
     }
   });
+
+/**
+ * Result callback sent by the M6 Judge Service (contract version 1.0,
+ * m6-judge/src/db/store.ts `completeSubmission`). Unknown fields are ignored.
+ */
+export const m6JudgeResultSchema = z
+  .object({
+    contractVersion: z.literal("1.0"),
+    eventId: z.string().min(1),
+    judgeSubmissionId: z.string().min(1),
+    clientSubmissionId: z.string().min(1),
+    executionStatus: z.enum(["completed", "failed"]),
+    verdict: z.enum(["AC", "WA", "TLE", "RTE", "CE"]).optional(),
+    summary: z
+      .object({
+        totalTests: z.number().int().nonnegative(),
+        passedTests: z.number().int().nonnegative(),
+        failedTests: z.number().int().nonnegative(),
+      })
+      .optional(),
+    metrics: z.object({ runtimeMs: z.number().nonnegative().optional() }).optional(),
+    diagnostics: z
+      .object({
+        compileMessage: z.string().nullable().optional(),
+        tests: z
+          .array(
+            z.object({
+              testCaseId: z.string().min(1),
+              visibility: z.enum(["public", "hidden"]).default("hidden"),
+              verdict: z.enum(["AC", "WA", "TLE", "RTE"]),
+              runtimeMs: z.number().nonnegative().default(0),
+            })
+          )
+          .optional(),
+      })
+      .optional(),
+    failure: z.object({ code: z.string().min(1), retryable: z.boolean().optional() }).optional(),
+  })
+  .superRefine((payload, ctx) => {
+    if (payload.executionStatus === "completed" && !payload.verdict) {
+      ctx.addIssue({ code: "custom", message: "verdict is required when executionStatus is 'completed'", path: ["verdict"] });
+    }
+    if (payload.executionStatus === "failed" && !payload.failure) {
+      ctx.addIssue({ code: "custom", message: "failure is required when executionStatus is 'failed'", path: ["failure"] });
+    }
+  });
+
+export type M6JudgeResult = z.infer<typeof m6JudgeResultSchema>;
+
+/** Maps an M6 result onto M3's judge callback input. */
+export function fromM6JudgeResult(result: M6JudgeResult): JudgeCallbackInput {
+  if (result.executionStatus === "failed") {
+    return {
+      submissionId: result.clientSubmissionId,
+      judgeJobId: result.judgeSubmissionId,
+      status: "failed",
+      error: result.failure?.code ?? "JUDGE_FAILED",
+      executionMs: 0,
+      memoryKb: 0,
+      testResults: [],
+    };
+  }
+
+  return {
+    submissionId: result.clientSubmissionId,
+    judgeJobId: result.judgeSubmissionId,
+    status: "completed",
+    finalStatus: result.verdict,
+    error: null,
+    executionMs: result.metrics?.runtimeMs ?? 0,
+    memoryKb: 0, // M6 does not report memory usage
+    testResults: (result.diagnostics?.tests ?? []).map((test) => ({
+      testCaseId: test.testCaseId,
+      status: test.verdict,
+      executionMs: test.runtimeMs,
+      message: null,
+      hidden: test.visibility !== "public",
+    })),
+  };
+}
 
 export type CreateAssessmentInput = z.infer<typeof createAssessmentSchema>;
 export type CreateAssessmentItemInput = z.infer<typeof createAssessmentItemSchema>;

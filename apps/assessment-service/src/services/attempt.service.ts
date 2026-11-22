@@ -3,13 +3,18 @@
  * @description Orchestrates learner attempt lifecycle, inter-service enrollment checks, and scoring.
  */
 
-import { courseClient, CourseServiceClient, type EnrollmentCheckResult } from "../clients/course.client";
+import {
+  courseClient,
+  CourseServiceClient,
+  type EnrollmentCheckResult,
+  type M2CallerContext,
+} from "../clients/course.client";
 import { eventPublisher, EventPublisher } from "../events/event.publisher";
 import type { ItemGradingSummary } from "../events/event.types";
 import { mapItemForLearner, type LearnerSafeItem } from "../mappers/assessment.mapper";
 import { ServiceError } from "../middlewares/error.middleware";
 import { assessmentRepository, AssessmentRepository } from "../repositories/assessment.repository";
-import type { Answer, Attempt, CodeSubmission } from "../schemas/assessment.types";
+import type { Answer, Attempt, CodeSubmission, ProgrammingLanguage } from "../schemas/assessment.types";
 import { gradeMcq } from "./grading.service";
 import { queueService, QueueService } from "./queue.service";
 
@@ -23,11 +28,12 @@ export class AttemptService {
 
   /**
    * Starts an attempt for an assessment after verifying enrollment with M2 Course Service.
+   * Pass the learner's M1 access token in `caller` so M2 can answer for that learner.
    */
   async startAttempt(
     assessmentId: string,
     userId: string,
-    correlationId?: string
+    caller: M2CallerContext = {}
   ): Promise<{ attempt: Attempt; items: LearnerSafeItem[] }> {
     const assessment = await this.repo.findAssessmentById(assessmentId);
     if (!assessment) {
@@ -40,7 +46,7 @@ export class AttemptService {
     // 1. Inter-Service RPC: Check enrollment with M2 Course Service
     let enrollment: EnrollmentCheckResult;
     try {
-      enrollment = await this.m2Client.checkEnrollment(assessment.courseId, userId, correlationId);
+      enrollment = await this.m2Client.checkEnrollment(assessment.courseId, userId, caller);
     } catch (err: unknown) {
       throw new ServiceError(
         503,
@@ -139,14 +145,15 @@ export class AttemptService {
   }
 
   /**
-   * Dispatches code to M6 Judge Worker queue asynchronously.
+   * Dispatches code to the M6 Judge Service asynchronously.
    */
   async submitCode(
     attemptId: string,
     userId: string,
     itemId: string,
-    language: string,
-    sourceCode: string
+    language: ProgrammingLanguage,
+    sourceCode: string,
+    correlationId?: string
   ): Promise<CodeSubmission> {
     const attempt = await this.repo.findAttemptById(attemptId);
     if (!attempt) {
@@ -182,7 +189,8 @@ export class AttemptService {
       );
     }
 
-    const assessment = await this.repo.findAssessmentById(attempt.assessmentId);
+    const previousSubmissions = await this.repo.listCodeSubmissionsByAttemptId(attemptId);
+    const revision = previousSubmissions.filter((previous) => previous.itemId === itemId).length + 1;
 
     // Insert CodeSubmission in queued state
     const submission = await this.repo.createCodeSubmission({
@@ -197,22 +205,29 @@ export class AttemptService {
       maxScore: item.points,
     });
 
-    // Dispatch job to BullMQ
-    const jobId = await this.queue.enqueueJudgeJob({
-      submissionId: submission.id,
-      attemptId,
-      itemId,
-      courseId: assessment?.courseId ?? "",
-      language,
-      sourceCode,
-      testCases: programmingPayload.hiddenTestCases,
-      limits: programmingPayload.limits,
-      callbackUrl: "/internal/judge/callback",
-      submittedAt: new Date().toISOString(),
-    });
+    // Hand the submission to M6; a submission M6 never accepted must not stay "queued",
+    // or it would hold the attempt in `grading` forever.
+    let jobId: string;
+    try {
+      jobId = await this.queue.enqueueJudgeJob({
+        submissionId: submission.id,
+        attemptId,
+        item,
+        revision,
+        language,
+        sourceCode,
+        correlationId,
+      });
+    } catch (err: unknown) {
+      await this.repo.updateCodeSubmission(submission.id, {
+        status: "failed",
+        errorMessage: err instanceof Error ? err.message : "Judge dispatch failed",
+      });
+      throw err;
+    }
 
-    await this.repo.updateCodeSubmission(submission.id, { judgeJobId: jobId });
-    return submission;
+    const dispatched = await this.repo.updateCodeSubmission(submission.id, { judgeJobId: jobId });
+    return dispatched ?? submission;
   }
 
   /**

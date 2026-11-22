@@ -39,9 +39,9 @@ The Assessment Service runs as an independent, containerized service adopting th
 └── src/
     ├── config/                        # Environment config and Zod validation
     ├── db/                            # Dedicated Drizzle PostgreSQL schema & connection
-    ├── clients/                       # Inter-service RPC client for M2 Course Service
+    ├── clients/                       # Inter-service clients for M2 Course Service and M6 Judge Service
     ├── events/                        # Domain event definitions and publisher
-    ├── middlewares/                   # Gateway header identity extractor & error handling
+    ├── middlewares/                   # Identity (M1 access tokens / gateway headers) & error handling
     ├── routes/                        # Elysia route controllers (Health, Instructor, Learner, Internal)
     ├── services/                      # Business logic, pure grading engines, queue & callback services
     ├── repositories/                  # Drizzle repository operations
@@ -78,6 +78,10 @@ bun run dev
 docker compose up -d
 ```
 
+The container joins the main stack's `lurnkode-network` to reach M1/M2 at `http://api:8000`,
+so start the main stack first (`docker compose up -d` in the repository root), or create the
+network once with `docker network create lurnkode-network` to run M3 on its own.
+
 ### Seeding Test Data
 ```bash
 bun run seed
@@ -85,22 +89,50 @@ bun run seed
 
 ### Authentication
 
-Public routes expect identity to be injected by the M1 API Gateway. For local
-calls, pass the same headers directly:
+Callers send the access token they got from M1 (`POST /api/v1/auth/login`).
+M3 verifies it against M1's JWKS (`M1_JWKS_URL`) or public key (`JWT_PUBLIC_KEY`),
+including issuer and audience, and reads the user id (`sub`) and role (`role`).
+M1's roles `Learner` / `Instructor` / `Admin` are accepted in any letter case.
 
 ```bash
-# Instructor routes
--H "X-User-Id: instructor-1" -H "X-User-Role: instructor"
-
-# Learner routes
--H "X-User-Id: learner-1" -H "X-User-Role: learner"
-
-# Internal judge callback (M6)
--H "X-Internal-Token: $INTERNAL_SERVICE_TOKEN"
+-H "Authorization: Bearer $M1_ACCESS_TOKEN"
 ```
 
-Requests without an identity now fail with `401`; a valid identity with the
-wrong role fails with `403`. There is no development-user fallback.
+With a token, M3 also asks M2 on the caller's behalf:
+- starting an attempt checks the learner's enrollment (`GET /api/v1/my/enrollments`);
+- authoring checks that the instructor owns the course (`GET /api/v1/courses/:id`; admins may manage any course).
+
+Gateway headers are accepted only when `TRUST_GATEWAY_HEADERS=true`, which is the
+default outside production (local demos, tests) and off in production:
+
+```bash
+-H "X-User-Id: instructor-1" -H "X-User-Role: instructor"
+-H "X-User-Id: learner-1" -H "X-User-Role: learner"
+```
+
+Header identity carries no token, so the M2 course-ownership check is skipped and
+enrollment uses M2's internal endpoint (`/internal/courses/:courseId/enrollments/:userId`,
+not implemented by M2 yet; development mode falls back to allowing the learner).
+
+Requests without an identity fail with `401`; a valid identity with the wrong
+role fails with `403`. There is no development-user fallback.
+
+### Judging code (M6)
+
+Set `JUDGE_API_URL` and `JUDGE_API_TOKEN` to send submissions to M6's
+`POST /internal/v1/judge-submissions` (contract 1.0). M6 posts results back to
+`POST /internal/v1/judge-results` with `Authorization: Bearer $JUDGE_CALLBACK_TOKEN`
+(M6's `CALLBACK_TOKEN`), so point M6's `CALLBACK_URL` at that route.
+
+- Languages: `python` and `cpp` (what M6 runs).
+- Programs read each test's `input` on stdin; stdout is compared with `expectedOutput`
+  ignoring trailing whitespace.
+- Limits may not exceed M6's ceilings: 1 CPU, 128 MB, 3000 ms.
+
+Without `JUDGE_API_URL`, development keeps a local stub and results can be
+simulated with `bun run fake-judge <submissionId>`, which uses M3's own callback
+(`POST /internal/judge/callback`, `X-Internal-Token: $INTERNAL_SERVICE_TOKEN`).
+In production, code submissions are refused until the judge is configured.
 
 ---
 
@@ -117,4 +149,5 @@ wrong role fails with `403`. There is no development-user fallback.
 | `POST` | `/learner/attempts/:attemptId/answers` | Submit synchronous MCQ answer |
 | `POST` | `/learner/attempts/:attemptId/code-submissions`| Submit code for async judge evaluation |
 | `POST` | `/learner/attempts/:attemptId/finish` | Finish attempt (`grading` if judge jobs pending, otherwise `completed` + event) |
-| `POST` | `/internal/judge/callback` | Authenticated callback from M6 Judge Worker |
+| `POST` | `/internal/v1/judge-results` | Result callback from the M6 Judge Service (Bearer `JUDGE_CALLBACK_TOKEN`) |
+| `POST` | `/internal/judge/callback` | M3-format judge callback used by `scripts/fake-judge.ts` |

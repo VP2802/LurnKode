@@ -40,8 +40,11 @@ export interface ExecutionLimits {
   timeoutMs: number;  // e.g. 3000
 }
 
+/** Languages the M6 judge can run. */
+export type ProgrammingLanguage = "python" | "cpp";
+
 export interface ProgrammingPayload {
-  language: "python" | "javascript" | "typescript";
+  language: ProgrammingLanguage;
   starterCode?: string;
   solution?: string; // Protected: never exposed to learner
   hiddenTestCases: TestCase[]; // Protected: never exposed to learner
@@ -105,7 +108,7 @@ export interface CodeSubmission {
   id: string;
   attemptId: string;
   itemId: string;
-  language: string;
+  language: ProgrammingLanguage;
   sourceCode: string;
   status: CodeSubmissionStatus;
   judgeJobId?: string | null;

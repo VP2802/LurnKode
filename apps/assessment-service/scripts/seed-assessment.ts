@@ -52,14 +52,18 @@ export async function seedAssessment() {
     id: DEMO_CODE_ITEM_ID,
     type: "programming",
     title: "Palindrome Checker",
-    prompt: "Implement a function `is_palindrome(s: str) -> bool`.",
+    // M6 grades stdin → stdout programs: each test's input is fed on stdin and stdout is compared.
+    prompt:
+      "Read one line from standard input and print `True` if it is a palindrome " +
+      "(ignoring spaces and letter case), otherwise print `False`.",
     points: 15,
     sortOrder: 2,
     difficulty: "medium",
     tags: ["python", "string"],
     programmingPayload: {
       language: "python",
-      starterCode: "def is_palindrome(s: str) -> bool:\n    pass\n",
+      starterCode:
+        "def is_palindrome(s: str) -> bool:\n    pass\n\n\nprint(is_palindrome(input()))\n",
       limits: { cpu: 1, memoryMb: 128, timeoutMs: 3000 },
       hiddenTestCases: [
         { id: "tc_1", input: "racecar", expectedOutput: "True", hidden: false, weight: 1 },

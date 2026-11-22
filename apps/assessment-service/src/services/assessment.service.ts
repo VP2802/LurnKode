@@ -3,13 +3,59 @@
  * @description Core business logic for assessment authoring, publishing, and question banking.
  */
 
+import { courseClient, CourseServiceClient, type CourseAccessResult } from "../clients/course.client";
 import { assessmentRepository, AssessmentRepository } from "../repositories/assessment.repository";
 import { ServiceError } from "../middlewares/error.middleware";
+import type { UserContext } from "../middlewares/auth.middleware";
 import type { Assessment, AssessmentItem } from "../schemas/assessment.types";
 import type { CreateAssessmentInput, CreateAssessmentItemInput } from "../schemas/assessment.zod";
 
 export class AssessmentService {
-  constructor(private repo: AssessmentRepository = assessmentRepository) {}
+  constructor(
+    private repo: AssessmentRepository = assessmentRepository,
+    private m2Client: CourseServiceClient = courseClient
+  ) {}
+
+  /**
+   * Ensures the caller owns the M2 course (or is an admin) before authoring for it.
+   * Needs the caller's M1 access token so M2 can answer for that caller; identity that
+   * came from trusted gateway headers carries no token, and the check is skipped.
+   */
+  async assertCanManageCourse(courseId: string, user: UserContext): Promise<void> {
+    if (!user.accessToken) return;
+
+    let access: CourseAccessResult;
+    try {
+      access = await this.m2Client.checkCourseAccess(courseId, user.userId, user.role, {
+        accessToken: user.accessToken,
+        correlationId: user.correlationId,
+      });
+    } catch (err: unknown) {
+      throw new ServiceError(
+        503,
+        "M2_UNAVAILABLE",
+        "Course ownership could not be verified; please retry shortly",
+        err instanceof Error ? err.message : undefined
+      );
+    }
+
+    if (!access.exists) {
+      throw new ServiceError(404, "COURSE_NOT_FOUND", `Course ${courseId} was not found in the course service`);
+    }
+    if (!access.canManage) {
+      throw new ServiceError(403, "NOT_COURSE_OWNER", "You do not own this course");
+    }
+  }
+
+  /** Loads an assessment and checks the caller may manage its course. */
+  async getManagedAssessment(id: string, user: UserContext): Promise<Assessment> {
+    const assessment = await this.repo.findAssessmentById(id);
+    if (!assessment) {
+      throw new ServiceError(404, "ASSESSMENT_NOT_FOUND", "Assessment not found");
+    }
+    await this.assertCanManageCourse(assessment.courseId, user);
+    return assessment;
+  }
 
   async createAssessment(input: CreateAssessmentInput & { id?: string }): Promise<Assessment> {
     return this.repo.createAssessment({

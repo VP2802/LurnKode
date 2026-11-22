@@ -262,7 +262,7 @@ describe("Attempt scoring and lifecycle", () => {
 
     const res = await call("POST", `/learner/attempts/${attemptId}/code-submissions`, {
       headers: learnerHeaders(userId),
-      body: { itemId: programmingId, language: "javascript", sourceCode: "console.log(1)" },
+      body: { itemId: programmingId, language: "cpp", sourceCode: "int main() { return 0; }" },
     });
 
     expect(res.status).toBe(400);

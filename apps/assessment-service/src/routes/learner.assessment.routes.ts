@@ -3,7 +3,7 @@
  * @description HTTP route controllers for learner attempt, answer, and submission endpoints.
  *
  * Microservice Gateway Context:
- * - Learner identity injected via X-User-Id and X-User-Role headers.
+ * - Learner identity: an M1 access token (Authorization: Bearer), or trusted X-User-Id / X-User-Role headers.
  * - Missing/invalid identity is rejected; there is no development-user fallback.
  */
 
@@ -32,7 +32,7 @@ export const learnerRoutes = new Elysia({ prefix: "/learner" })
   })
   .get("/attempts/:attemptId", async ({ params: { attemptId }, headers, set }) => {
     try {
-      const user = requireRole(headers, LEARNER_ROLES);
+      const user = await requireRole(headers, LEARNER_ROLES);
       return await attemptService.getAttempt(attemptId, user.userId);
     } catch (err: unknown) {
       return handleRouteError(err, set);
@@ -40,9 +40,12 @@ export const learnerRoutes = new Elysia({ prefix: "/learner" })
   })
   .post("/assessments/:id/attempts", async ({ params: { id }, headers, set }) => {
     try {
-      const user = requireRole(headers, LEARNER_ROLES);
+      const user = await requireRole(headers, LEARNER_ROLES);
 
-      const result = await attemptService.startAttempt(id, user.userId, user.correlationId);
+      const result = await attemptService.startAttempt(id, user.userId, {
+        correlationId: user.correlationId,
+        accessToken: user.accessToken,
+      });
       set.status = 201;
       return result;
     } catch (err: unknown) {
@@ -51,7 +54,7 @@ export const learnerRoutes = new Elysia({ prefix: "/learner" })
   })
   .post("/attempts/:attemptId/answers", async ({ params: { attemptId }, headers, body, set }) => {
     try {
-      const user = requireRole(headers, LEARNER_ROLES);
+      const user = await requireRole(headers, LEARNER_ROLES);
 
       const parsed = submitMcqAnswerSchema.safeParse(body);
       if (!parsed.success) {
@@ -71,7 +74,7 @@ export const learnerRoutes = new Elysia({ prefix: "/learner" })
   })
   .post("/attempts/:attemptId/code-submissions", async ({ params: { attemptId }, headers, body, set }) => {
     try {
-      const user = requireRole(headers, LEARNER_ROLES);
+      const user = await requireRole(headers, LEARNER_ROLES);
 
       const parsed = submitCodeSchema.safeParse(body);
       if (!parsed.success) {
@@ -84,7 +87,8 @@ export const learnerRoutes = new Elysia({ prefix: "/learner" })
         user.userId,
         parsed.data.itemId,
         parsed.data.language,
-        parsed.data.sourceCode
+        parsed.data.sourceCode,
+        user.correlationId
       );
       set.status = 202; // Accepted for async grading
       return submission;
@@ -94,7 +98,7 @@ export const learnerRoutes = new Elysia({ prefix: "/learner" })
   })
   .post("/attempts/:attemptId/finish", async ({ params: { attemptId }, headers, set }) => {
     try {
-      const user = requireRole(headers, LEARNER_ROLES);
+      const user = await requireRole(headers, LEARNER_ROLES);
 
       return await attemptService.finishAttempt(attemptId, user.userId);
     } catch (err: unknown) {
