@@ -1,0 +1,107 @@
+/**
+ * @file routes/learner.assessment.routes.ts
+ * @description HTTP route controllers for learner attempt, answer, and submission endpoints.
+ *
+ * Microservice Gateway Context:
+ * - Learner identity: an M1 access token (Authorization: Bearer), or trusted X-User-Id / X-User-Role headers.
+ * - Missing/invalid identity is rejected; there is no development-user fallback.
+ */
+
+import { Elysia } from "elysia";
+import { attemptService } from "../services/attempt.service";
+import { assessmentService } from "../services/assessment.service";
+import { submitMcqAnswerSchema, submitCodeSchema } from "../schemas/assessment.zod";
+import { mapItemForLearner } from "../mappers/assessment.mapper";
+import { requireRole } from "../middlewares/auth.middleware";
+import { handleRouteError } from "../middlewares/error.middleware";
+
+const LEARNER_ROLES = ["learner", "student"] as const;
+
+export const learnerRoutes = new Elysia({ prefix: "/learner" })
+  .get("/assessments/course/:courseId", async ({ params: { courseId } }) => {
+    return await assessmentService.listAssessmentsByCourse(courseId);
+  })
+  .get("/assessments/:id", async ({ params: { id }, set }) => {
+    const assessment = await assessmentService.getAssessment(id);
+    if (!assessment) {
+      set.status = 404;
+      return { error: "Assessment not found" };
+    }
+    const items = await assessmentService.listItems(id);
+    return { ...assessment, items: items.map(mapItemForLearner) };
+  })
+  .get("/attempts/:attemptId", async ({ params: { attemptId }, headers, set }) => {
+    try {
+      const user = await requireRole(headers, LEARNER_ROLES);
+      return await attemptService.getAttempt(attemptId, user.userId);
+    } catch (err: unknown) {
+      return handleRouteError(err, set);
+    }
+  })
+  .post("/assessments/:id/attempts", async ({ params: { id }, headers, set }) => {
+    try {
+      const user = await requireRole(headers, LEARNER_ROLES);
+
+      const result = await attemptService.startAttempt(id, user.userId, {
+        correlationId: user.correlationId,
+        accessToken: user.accessToken,
+      });
+      set.status = 201;
+      return result;
+    } catch (err: unknown) {
+      return handleRouteError(err, set);
+    }
+  })
+  .post("/attempts/:attemptId/answers", async ({ params: { attemptId }, headers, body, set }) => {
+    try {
+      const user = await requireRole(headers, LEARNER_ROLES);
+
+      const parsed = submitMcqAnswerSchema.safeParse(body);
+      if (!parsed.success) {
+        set.status = 400;
+        return { error: "Validation Error", details: parsed.error.format() };
+      }
+
+      return await attemptService.submitMcqAnswer(
+        attemptId,
+        user.userId,
+        parsed.data.itemId,
+        parsed.data.selectedOptionIds
+      );
+    } catch (err: unknown) {
+      return handleRouteError(err, set);
+    }
+  })
+  .post("/attempts/:attemptId/code-submissions", async ({ params: { attemptId }, headers, body, set }) => {
+    try {
+      const user = await requireRole(headers, LEARNER_ROLES);
+
+      const parsed = submitCodeSchema.safeParse(body);
+      if (!parsed.success) {
+        set.status = 400;
+        return { error: "Validation Error", details: parsed.error.format() };
+      }
+
+      const submission = await attemptService.submitCode(
+        attemptId,
+        user.userId,
+        parsed.data.itemId,
+        parsed.data.language,
+        parsed.data.sourceCode,
+        user.correlationId
+      );
+      set.status = 202; // Accepted for async grading
+      return submission;
+    } catch (err: unknown) {
+      return handleRouteError(err, set);
+    }
+  })
+  .post("/attempts/:attemptId/finish", async ({ params: { attemptId }, headers, set }) => {
+    try {
+      const user = await requireRole(headers, LEARNER_ROLES);
+
+      return await attemptService.finishAttempt(attemptId, user.userId);
+    } catch (err: unknown) {
+      return handleRouteError(err, set);
+    }
+  });

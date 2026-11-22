@@ -1,0 +1,73 @@
+services:
+  assessment-service:
+    build:
+      context: .
+      target: development
+    container_name: lurnkode-assessment-service
+    restart: unless-stopped
+    ports:
+      - "4003:4003"
+    environment:
+      - NODE_ENV=development
+      - PORT=4003
+      - HOST=0.0.0.0
+      - DATABASE_URL=postgresql://postgres:postgres@postgres-assessment:5432/lurnkode_assessment?schema=public
+      - REDIS_URL=redis://redis-assessment:6379
+      - INTERNAL_SERVICE_TOKEN=m3-internal-secret-token
+      # M1 + M2 run in the main stack's `api` container (repo-root docker-compose.yml).
+      - M1_JWKS_URL=http://api:8000/.well-known/jwks.json
+      - M2_COURSE_SERVICE_URL=http://api:8000
+      - M2_REQUEST_TIMEOUT_MS=2000
+      - M2_INTERNAL_SERVICE_KEY=lurnkode_internal_secret_key_m4
+      # M6 judge (m6-judge/). Leave unset to grade with scripts/fake-judge.ts instead.
+      # M6's judge-api must be on lurnkode-network, with CALLBACK_URL pointing at
+      # http://assessment-service:4003/internal/v1/judge-results.
+      # - JUDGE_API_URL=http://judge-api:4000
+      # - JUDGE_API_TOKEN=dev-m3-token
+      # - JUDGE_CALLBACK_TOKEN=dev-callback-token
+    depends_on:
+      - postgres-assessment
+      - redis-assessment
+    networks:
+      - assessment-internal
+      - lurnkode-network
+
+  postgres-assessment:
+    image: postgres:16-alpine
+    container_name: lurnkode-postgres-assessment
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=lurnkode_assessment
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_assessment_data:/var/lib/postgresql/data
+    networks:
+      - assessment-internal
+
+  redis-assessment:
+    image: redis:7-alpine
+    container_name: lurnkode-redis-assessment
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_assessment_data:/data
+    networks:
+      - assessment-internal
+
+volumes:
+  postgres_assessment_data:
+  redis_assessment_data:
+
+networks:
+  # M3's own database and Redis stay private to the service.
+  assessment-internal:
+    driver: bridge
+  # Created by the main stack (repo-root docker-compose.yml); joining it lets M3 reach `api` (M1/M2).
+  # Start the main stack first, or create the network once: docker network create lurnkode-network
+  lurnkode-network:
+    name: lurnkode-network
+    external: true
